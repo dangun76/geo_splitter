@@ -39,6 +39,7 @@
   header.top .top-left{ display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; min-width:0; }
   header.top h1{ font-size:17px; margin:0; font-weight:700; letter-spacing:-0.01em; }
   header.top span.tag{ font-size:12.5px; color:#b9c2cc; }
+  header.top span.ver{ font-size:11px; font-weight:700; color:#8a93a6; background:rgba(255,255,255,.08); padding:1px 7px; border-radius:999px; }
 
   .settings-btn{
     display:inline-flex; align-items:center; gap:7px; background:rgba(255,255,255,.10); color:#fff;
@@ -223,6 +224,11 @@
   .rv-reason[hidden]{ display:none; }
   .rv-reason.resolved{ color:var(--ink-soft); }
 
+  .rv-move{ display:inline-flex; gap:2px; }
+  button.rv-move-btn{ width:24px; height:24px; padding:0; border:1px solid var(--line); border-radius:6px; background:#fff; color:var(--ink-soft); font-size:12px; cursor:pointer; line-height:1; }
+  button.rv-move-btn:hover:not(:disabled){ border-color:var(--accent); color:var(--accent); }
+  button.rv-move-btn:disabled{ opacity:.35; cursor:not-allowed; }
+
   /* text areas: where the text came from, and whether the user changed it */
   .rv-origin{ display:flex; align-items:center; flex-wrap:wrap; gap:4px 8px; margin:0 0 10px; padding:6px 10px; border-radius:7px; background:#f4f4f6; font-size:12px; color:var(--ink-soft); line-height:1.45; }
   .rv-origin .tag{ font-size:11px; font-weight:700; color:var(--ink); background:#e7e7eb; padding:1px 9px; border-radius:999px; white-space:nowrap; }
@@ -359,6 +365,7 @@
   <div class="top-left">
     <h1>GEO 이미지 분해기</h1>
     <span class="tag">통이미지 → 텍스트/이미지 재구성 · Cafe24 상품상세 HTML 생성</span>
+    <span class="ver" title="버전">v1.0</span>
   </div>
   <button type="button" class="settings-btn" id="settingsBtn" onclick="toggleSettings()" aria-haspopup="true" aria-expanded="false">
     <span class="settings-btn-icon" id="settingsBtnIcon">⚙</span>
@@ -1435,8 +1442,13 @@ function reviewDecorateCards(){
     const isImg = b.type === 'image';
     const sub = isImg ? '' : (b.type in REVIEW_SUBTYPE ? REVIEW_SUBTYPE[b.type] : String(b.type));
     head.className = 'block-head rv-head';
+    const n = extractedBlocks.length;
     head.innerHTML =
       `<span class="rv-num">${i + 1}</span>` +
+      `<span class="rv-move">` +
+        `<button type="button" class="rv-move-btn" title="위로 이동" aria-label="${i+1}번을 위로 이동" onclick="moveBlock(${i}, -1)" ${i === 0 ? 'disabled' : ''}>▲</button>` +
+        `<button type="button" class="rv-move-btn" title="아래로 이동" aria-label="${i+1}번을 아래로 이동" onclick="moveBlock(${i}, 1)" ${i === n - 1 ? 'disabled' : ''}>▼</button>` +
+      `</span>` +
       `<span class="rv-type">${isImg ? '이미지' : '텍스트'}</span>` +
       (sub ? `<span class="rv-sub">${escapeHtml(sub)}</span>` : '') +
       `<button type="button" class="rv-src none" onclick="reviewSelect(${i}, { reveal: true })"></button>` +
@@ -1552,6 +1564,76 @@ function reviewUpdateModeInfo(){
   const titleEl = radio && radio.closest('.mode-card') && radio.closest('.mode-card').querySelector('.mode-card-title');
   const label = titleEl && titleEl.firstChild ? titleEl.firstChild.textContent.trim() : '이미지 분해';
   document.getElementById('rvActionInfo').innerHTML = `변환 방식: <b>${escapeHtml(label)}</b> · 생성할 때 적용돼요`;
+}
+
+// Writes what's currently on screen back into the block's own data — the same
+// per-type fields generateFinalOutput() and reviewSigFromDom() already read.
+// Needed before any operation that reorders/removes blocks and re-renders, so a
+// pending edit elsewhere on the page doesn't get thrown away and replaced with
+// the AI's original wording.
+function reviewHarvestBlock(b, i){
+  const val = id => { const el = document.getElementById(id); return el ? el.value : undefined; };
+  const rows = (a, c) => {
+    const box = document.getElementById(`items-container-${i}`);
+    if (!box) return undefined;
+    return [...box.querySelectorAll('.item-row')]
+      .map(r => [r.querySelector(a) ? r.querySelector(a).value : '', r.querySelector(c) ? r.querySelector(c).value : ''])
+      .filter(r => r[0] || r[1]);
+  };
+  switch (b.type){
+    case 'image': {
+      const alt = val(`edit-alt-${i}`), cap = val(`edit-caption-${i}`);
+      if (alt !== undefined) b.alt = alt;
+      if (cap !== undefined) b.caption = cap;
+      break;                                     // crop_top/bottom_pct are already kept live by updateCrop()
+    }
+    case 'list': {
+      const h = val(`edit-heading-${i}`), items = val(`edit-items-${i}`);
+      if (h !== undefined) b.heading = h;
+      if (items !== undefined) b.items = items.split('\n').map(s => s.trim()).filter(Boolean);
+      break;
+    }
+    case 'table': {
+      const h = val(`edit-heading-${i}`), r = rows('.table-label-input', '.table-value-input');
+      if (h !== undefined) b.heading = h;
+      if (r !== undefined) b.rows = r;
+      break;
+    }
+    case 'review': {
+      const r = rows('.review-text-input', '.review-date-input');
+      if (r !== undefined) b.items = r.map(([text, date]) => ({ text, date }));
+      break;
+    }
+    case 'faq': {
+      const r = rows('.faq-q-input', '.faq-a-input');
+      if (r !== undefined) b.items = r.map(([q, a]) => ({ q, a }));
+      break;
+    }
+    default: {
+      const h = val(`edit-heading-${i}`), bd = val(`edit-body-${i}`);
+      if (h !== undefined) b.heading = h;
+      if (bd !== undefined) b.body = bd;
+    }
+  }
+}
+
+function reviewHarvestAll(){
+  extractedBlocks.forEach((b, i) => reviewHarvestBlock(b, i));
+  const t = document.getElementById('edit-title'); if (t) productTitleH3 = t.value;
+  const intro = document.getElementById('edit-intro'); if (intro) introParagraph = intro.value;
+}
+
+// ▲▼: swap with the neighbor. Harvests every block's current on-screen edits
+// first, so nothing typed elsewhere on the page is lost when the list redraws.
+function moveBlock(i, dir){
+  const j = i + dir;
+  if (j < 0 || j >= extractedBlocks.length) return;
+  reviewHarvestAll();
+  [extractedBlocks[i], extractedBlocks[j]] = [extractedBlocks[j], extractedBlocks[i]];
+  renderBlocks();
+  reviewSelect(j, { scrollViewer: false });
+  const card = document.querySelector(`#blocksContainer > .block-card[data-block="${j}"]`);
+  if (card) card.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 function toggleBlockConfirmed(i){
@@ -1861,6 +1943,7 @@ function renderBlocks(){
 }
 
 function deleteBlock(i){
+  reviewHarvestAll();      // keep edits made in OTHER blocks — this was the pre-existing bug the move feature would have inherited
   extractedBlocks.splice(i, 1);
   renderBlocks();
 }
