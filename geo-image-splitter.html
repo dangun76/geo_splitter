@@ -155,6 +155,15 @@
     width:16px; height:16px; border-radius:50%; background:var(--amber-soft); color:#c2570c; font-size:11px; font-weight:800;
   }
   /* output actions: one Primary (copy) + one Secondary (save to the work list) */
+  /* target platform selector */
+  .seg{ display:inline-flex; border:1px solid var(--line); border-radius:9px; overflow:hidden; background:#fff; }
+  .seg-opt{ position:relative; cursor:pointer; }
+  .seg-opt input{ position:absolute; width:0; height:0; opacity:0; margin:0; pointer-events:none; }
+  .seg-opt span{ display:block; padding:8px 16px; border-right:1px solid var(--line); font-size:13px; font-weight:700; color:var(--ink-soft); }
+  .seg-opt:last-child span{ border-right:none; }
+  .seg-opt:hover input:not(:checked) + span{ background:var(--accent-soft); }
+  .seg-opt input:checked + span{ background:var(--accent); color:#fff; }
+  .seg-opt input:focus-visible + span{ outline:3px solid rgba(68,125,252,.38); outline-offset:-3px; }
   .out-actions{ display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin-top:12px; }
   .out-actions button{ font-family:inherit; line-height:1.55; }   /* same font + line-height for both, so the pair is exactly the same height */
   .out-actions button.primary{ margin-top:0; border:1px solid transparent; }
@@ -364,8 +373,8 @@
 <header class="top">
   <div class="top-left">
     <h1>GEO 이미지 분해기</h1>
-    <span class="tag">통이미지 → 텍스트/이미지 재구성 · Cafe24 상품상세 HTML 생성</span>
-    <span class="ver" title="버전">v1.0</span>
+    <span class="tag">통이미지 → 텍스트/이미지 재구성 · 상품상세 HTML 생성</span>
+    <span class="ver" title="버전">v1.1</span>
   </div>
   <button type="button" class="settings-btn" id="settingsBtn" onclick="toggleSettings()" aria-haspopup="true" aria-expanded="false">
     <span class="settings-btn-icon" id="settingsBtnIcon">⚙</span>
@@ -440,6 +449,13 @@
     </div>
     <p class="hint">"HTML 생성하기" 때 적용됩니다. 분석 후에도 바꿔 다시 생성할 수 있습니다(재분석 불필요).</p>
 
+    <label class="field" style="margin-top:18px;">대상 쇼핑몰</label>
+    <div class="seg" role="radiogroup" aria-label="대상 쇼핑몰">
+      <label class="seg-opt"><input type="radio" name="platform" value="cafe24" checked><span>Cafe24</span></label>
+      <label class="seg-opt"><input type="radio" name="platform" value="generic"><span>일반 쇼핑몰 (범용)</span></label>
+    </div>
+    <p class="hint" id="platformHint"></p>
+
     <details class="opt-section adv">
       <summary>⚙ 고급 설정 <span class="adv-state" id="advState">JSON-LD 포함</span></summary>
       <div class="opt-body">
@@ -468,7 +484,7 @@
           </label>
           <label class="field" style="margin-top:10px;">쇼핑몰 홈 URL <span class="hint" style="font-weight:400;">(Breadcrumb용, 비워두면 Breadcrumb만 생략)</span></label>
           <input type="text" id="shopHomeUrl" placeholder="예: https://dangunn76.cafe24.com/">
-          <p class="hint warn">⚠️ 카페24 보안/필터 앱에 따라 저장 시 걸러질 수 있습니다. 저장 후 반드시 페이지 소스에서 생존 여부를 확인하세요. 주석(&lt;!----&gt;)과 함께 붙여넣지 마세요.</p>
+          <p class="hint warn" id="ldWarn">⚠️ 카페24 보안/필터 앱에 따라 저장 시 걸러질 수 있습니다. 저장 후 반드시 페이지 소스에서 생존 여부를 확인하세요. 주석(&lt;!----&gt;)과 함께 붙여넣지 마세요.</p>
         </div>
       </div>
     </details>
@@ -509,19 +525,27 @@
 
   <div class="panel" id="outputPanel" style="display:none;">
     <h2>완성된 코드 &amp; 이미지</h2>
-    <p class="sub">아래 HTML을 복사해 카페24 상세설명 소스모드에 붙여넣고, 이미지를 다운로드해 먼저 업로드한 뒤 <code>__IMG_01_URL__</code> 같은 자리를 실제 URL로 바꿔주세요.</p>
+    <p class="sub" id="outSub">아래 HTML을 복사해 카페24 상세설명 소스모드에 붙여넣고, 이미지를 다운로드해 먼저 업로드한 뒤 <code>__IMG_01_URL__</code> 같은 자리를 실제 URL로 바꿔주세요.</p>
 
     <label class="field">잘라낸 이미지 다운로드</label>
     <div class="thumbs" id="croppedThumbs"></div>
 
-    <label class="field">Cafe24 상품상세 HTML</label>
+    <label class="field" id="outLabel">Cafe24 상품상세 HTML</label>
     <textarea class="html-output" id="htmlOutput" readonly></textarea>
     <div class="out-actions">
       <button type="button" class="primary" onclick="copyHtml()">HTML 복사</button>
       <button type="button" class="secondary" onclick="saveToAccumulator()">작업 목록에 저장</button>
     </div>
 
-    <label class="field" style="margin-top:20px;">미리보기 <span class="hint" style="font-weight:400;">(실제 카페24 테마 디자인은 반영되지 않은, 레이아웃 참고용입니다)</span></label>
+    <div id="jsonLdBox" hidden>
+      <label class="field" style="margin-top:20px;">구조화 데이터 (JSON-LD) <span class="hint" style="font-weight:400;">선택 · 쇼핑몰 페이지의 head 또는 SEO 설정에 붙여넣을 수 있을 때만 사용하세요</span></label>
+      <textarea class="html-output" id="jsonLdOutput" readonly style="height:130px;"></textarea>
+      <div class="out-actions">
+        <button type="button" class="secondary" onclick="copyJsonLd()">JSON-LD 복사</button>
+      </div>
+    </div>
+
+    <label class="field" style="margin-top:20px;">미리보기 <span class="hint" id="previewHint" style="font-weight:400;">(실제 카페24 테마 디자인은 반영되지 않은, 레이아웃 참고용입니다)</span></label>
     <button class="emphasis" onclick="openPreviewWindow()" style="margin-bottom:10px;">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h6v6"/><path d="M9 21H3v-6"/><path d="M21 3l-7 7"/><path d="M3 21l7-7"/></svg>
       새 창에서 크게 보기 (데스크톱/모바일 전환)
@@ -540,7 +564,7 @@
         <button type="button" class="ghost small danger" id="clearAccBtn" onclick="clearAccumulator()">전체 삭제</button>
       </div>
     </div>
-    <p class="sub recent-sub">여러 상품을 저장한 뒤 CSV로 한 번에 내보내 카페24 일괄 변경에 활용하세요 · 이 브라우저에만 저장됩니다</p>
+    <p class="sub recent-sub">여러 상품을 저장한 뒤 CSV로 한 번에 내보내 쇼핑몰 상품 일괄 등록·수정(예: 카페24 일괄 변경)에 활용하세요 · 이 브라우저에만 저장됩니다</p>
     <p class="recent-empty" id="recentEmpty">아직 저장한 작업이 없습니다. 결과를 만든 뒤 "작업 목록에 저장"을 누르면 여기에 쌓입니다.</p>
     <div class="recent-scroll" id="recentScroll" hidden>
       <table class="acc-table" id="accTable">
@@ -685,7 +709,8 @@ window.addEventListener('DOMContentLoaded', () => {
     ro.observe(document.getElementById('rvActionBar'));
   }
   document.querySelectorAll('input[name="convMode"]').forEach(r => r.addEventListener('change', reviewUpdateModeInfo));
-  reviewUpdateModeInfo();
+  document.querySelectorAll('input[name="platform"]').forEach(r => r.addEventListener('change', reviewSyncPlatformUi));
+  reviewSyncPlatformUi();
 
   updateApiStatus();
 
@@ -1563,7 +1588,7 @@ function reviewUpdateModeInfo(){
   const radio = document.querySelector('input[name="convMode"]:checked');
   const titleEl = radio && radio.closest('.mode-card') && radio.closest('.mode-card').querySelector('.mode-card-title');
   const label = titleEl && titleEl.firstChild ? titleEl.firstChild.textContent.trim() : '이미지 분해';
-  document.getElementById('rvActionInfo').innerHTML = `변환 방식: <b>${escapeHtml(label)}</b> · 생성할 때 적용돼요`;
+  document.getElementById('rvActionInfo').innerHTML = `변환 방식: <b>${escapeHtml(label)}</b> · 대상: <b>${PLATFORM_TEXT[currentPlatform()].short}</b> · 생성할 때 적용돼요`;
 }
 
 // Writes what's currently on screen back into the block's own data — the same
@@ -2256,6 +2281,7 @@ function generateFinalOutput(){
     html += buildJsonLdScripts(productTitleH3, faqForLd, reviewsForLd, shopHomeUrl);
   }
 
+  html = applyPlatformProfile(html, accent, accentSoft);
   document.getElementById('htmlOutput').value = html;
 
   let previewHtml = html;
@@ -2317,6 +2343,126 @@ function openPreviewWindow(){
 </body></html>`);
   w.document.close();
   w.document.getElementById('innerFrame').srcdoc = currentPreviewDoc;
+}
+
+// ───────────────────────── 대상 쇼핑몰 (출력 형식) ─────────────────────────
+// "cafe24" = the original output, untouched. "generic" re-expresses the SAME content for storefront
+// editors that strip <style>/<script> or escape them into visible text: styles go inline on each tag,
+// no <style>/<script>/class remain, and JSON-LD is handed over separately instead of inside the body.
+const PLATFORM_TEXT = {
+  cafe24: {
+    short: 'Cafe24',
+    label: 'Cafe24 상품상세 HTML',
+    sub: '아래 HTML을 복사해 카페24 상세설명 소스모드에 붙여넣고, 이미지를 다운로드해 먼저 업로드한 뒤 <code>__IMG_01_URL__</code> 같은 자리를 실제 URL로 바꿔주세요.',
+    preview: '(실제 카페24 테마 디자인은 반영되지 않은, 레이아웃 참고용입니다)',
+    hint: 'Cafe24 상세설명(소스모드)에 맞춘 기본 형식이에요. 상단 &lt;style&gt; 블록과 구조화 데이터(JSON-LD)를 본문에 함께 넣습니다.',
+    ldWarn: '⚠️ 카페24 보안/필터 앱에 따라 저장 시 걸러질 수 있습니다. 저장 후 반드시 페이지 소스에서 생존 여부를 확인하세요. 주석(&lt;!----&gt;)과 함께 붙여넣지 마세요.'
+  },
+  generic: {
+    short: '범용',
+    label: '범용 상품상세 HTML',
+    sub: '아래 HTML을 복사해 쇼핑몰 상품 상세설명의 HTML(소스) 입력 모드에 붙여넣고, 이미지를 다운로드해 먼저 업로드한 뒤 <code>__IMG_01_URL__</code> 같은 자리를 실제 URL로 바꿔주세요. 구조화 데이터(JSON-LD)가 있으면 본문과 분리해 별도 박스로 드립니다.',
+    preview: '(실제 쇼핑몰 테마 디자인은 반영되지 않은, 레이아웃 참고용입니다)',
+    hint: '스타일을 태그에 직접 넣고 &lt;style&gt;·&lt;script&gt; 없이 만든 형식이에요. 구조화 데이터는 본문과 분리해 별도 박스로 드립니다. 에디터마다 걸러내는 태그가 달라서, 처음엔 한 번 붙여 넣어 서식이 유지되는지 확인해 보세요.',
+    ldWarn: '⚠️ 범용 형식에서는 구조화 데이터가 본문과 분리된 별도 박스로 나옵니다. 쇼핑몰 페이지의 head나 SEO 설정에 붙여넣을 수 있을 때만 사용하세요. 상세설명 에디터에 붙이면 글자로 보이거나 삭제될 수 있어요.'
+  }
+};
+const currentPlatform = () => {
+  const r = document.querySelector('input[name="platform"]:checked');
+  return r && r.value === 'generic' ? 'generic' : 'cafe24';
+};
+
+function toGenericHtml(html, accent, accentSoft){
+  const LD = /<script type="application\/ld\+json">[\s\S]*?<\/script>\n?/g;
+  const jsonLd = (html.match(LD) || []).join('').trim();       // taken verbatim from the original string
+  const doc = new DOMParser().parseFromString('<!DOCTYPE html><html><body>' + html.replace(LD, '') + '</body></html>', 'text/html');
+  doc.querySelectorAll('style, script').forEach(el => el.remove());
+  const root = doc.querySelector('.geo-pd');
+  if (!root) return { body: html, jsonLd: '' };                  // never lose the user's output on an unexpected shape
+
+  const st = (el, css) => el.setAttribute('style', css);
+  const retag = (el, tag) => {
+    const n = doc.createElement(tag);
+    [...el.attributes].forEach(a => n.setAttribute(a.name, a.value));
+    while (el.firstChild) n.appendChild(el.firstChild);
+    el.replaceWith(n);
+    return n;
+  };
+
+  st(root, "max-width:860px;margin:0 auto;font-family:'Pretendard','Apple SD Gothic Neo',sans-serif;color:#222;line-height:1.7;");
+  root.querySelectorAll('.geo-hero h3').forEach(el => st(el, 'font-size:22px;margin:0 0 10px;font-weight:800;letter-spacing:-0.01em;'));
+  root.querySelectorAll('.geo-hero .geo-intro').forEach(el => st(el, 'font-size:15px;color:#4a4a4a;margin:0 0 18px;'));
+  // h4 accent bar (was ::before) -> a real left border
+  root.querySelectorAll('h4').forEach(el => st(el, `font-size:16px;margin:30px 0 12px;font-weight:800;line-height:1.4;border-left:4px solid ${accent};padding-left:9px;`));
+  root.querySelectorAll('p').forEach(el => { if (!el.classList.contains('geo-intro')) st(el, 'font-size:14.5px;margin:0 0 10px;'); });
+
+  root.querySelectorAll('ul.geo-list').forEach(ul => {
+    st(ul, 'list-style:none;margin:0;padding:0;');
+    [...ul.children].forEach((li, i, all) => st(li, `list-style:none;padding:11px 14px;background:${accentSoft};border-radius:8px;font-size:13.5px;color:#333;margin:0 0 ${i === all.length - 1 ? 0 : 8}px;`));
+  });
+
+  root.querySelectorAll('table.geo-table').forEach(t => {
+    st(t, 'width:100%;border-collapse:collapse;margin:14px 0;font-size:13.5px;');
+    [...t.querySelectorAll('tr')].forEach((tr, i) => {            // :nth-child(even) striping, computed instead of selected
+      const even = (i + 1) % 2 === 0;
+      tr.querySelectorAll('th').forEach(th => st(th, `padding:10px 12px;text-align:left;border-bottom:1px solid #eee;width:38%;font-weight:700;color:#333;background:${even ? '#fafafa' : accentSoft};`));
+      tr.querySelectorAll('td').forEach(td => st(td, `padding:10px 12px;text-align:left;border-bottom:1px solid #eee;${even ? 'background:#fafafa;' : ''}`));
+    });
+  });
+
+  // FAQ "Q" badge and review quote mark were ::before glyphs. They are NOT recreated as text:
+  // that would put a stray "Q" into every question that crawlers and AI search read.
+  root.querySelectorAll('.geo-faq').forEach(f => {
+    st(f, `border:1px solid #ececec;border-left:3px solid ${accent};border-radius:10px;padding:14px 16px;margin-bottom:10px;`);
+    f.querySelectorAll('.q').forEach(q => st(q, 'font-weight:800;font-size:14px;margin-bottom:6px;color:#222;'));
+    f.querySelectorAll('.a').forEach(a => st(a, 'font-size:13.5px;color:#555;'));
+  });
+  root.querySelectorAll('.geo-review').forEach(r => {
+    st(r, `padding:14px 18px;margin-bottom:10px;background:#fafafa;border-left:3px solid ${accent};border-radius:10px;font-size:13.5px;color:#333;`);
+    r.querySelectorAll('.meta').forEach(m => st(m, 'font-size:11.5px;color:#999;margin-top:6px;'));
+  });
+
+  // <figure>/<figcaption> are stripped by some editors; plain <div>s survive almost everywhere
+  root.querySelectorAll('figure.geo-img').forEach(fig => {
+    st(fig, 'margin:16px 0;border-radius:14px;overflow:hidden;box-shadow:0 4px 14px rgba(0,0,0,.08);');
+    fig.querySelectorAll('img').forEach(im => st(im, 'display:block;width:100%;height:auto;'));
+    fig.querySelectorAll('figcaption').forEach(c => { st(c, 'padding:8px 12px;font-size:11.5px;color:#828282;background:#fafafa;'); retag(c, 'div'); });
+    retag(fig, 'div');
+  });
+
+  root.querySelectorAll('[class]').forEach(el => el.removeAttribute('class'));
+  root.removeAttribute('class');
+  return { body: root.outerHTML + '\n', jsonLd };
+}
+
+// Called once from generateFinalOutput(). For "cafe24" it returns the html untouched.
+function applyPlatformProfile(html, accent, accentSoft){
+  const p = currentPlatform(), T = PLATFORM_TEXT[p];
+  document.getElementById('outLabel').textContent = T.label;
+  document.getElementById('outSub').innerHTML = T.sub;
+  document.getElementById('previewHint').textContent = T.preview;
+  let ld = '';
+  if (p === 'generic'){
+    const g = toGenericHtml(html, accent, accentSoft);
+    html = g.body; ld = g.jsonLd;
+  }
+  document.getElementById('jsonLdOutput').value = ld;
+  document.getElementById('jsonLdBox').hidden = !ld;
+  return html;
+}
+
+function reviewSyncPlatformUi(){
+  const T = PLATFORM_TEXT[currentPlatform()];
+  document.getElementById('platformHint').innerHTML = T.hint;
+  document.getElementById('ldWarn').innerHTML = T.ldWarn;
+  reviewUpdateModeInfo();
+}
+
+function copyJsonLd(){
+  const ta = document.getElementById('jsonLdOutput');
+  ta.select();
+  document.execCommand('copy');
+  alert('구조화 데이터(JSON-LD)를 복사했습니다.');
 }
 
 function copyHtml(){
