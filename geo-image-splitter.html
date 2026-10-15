@@ -375,7 +375,7 @@
   <div class="top-left">
     <h1>GEO 이미지 분해기</h1>
     <span class="tag">통이미지 → 텍스트/이미지 재구성 · 상품상세 HTML 생성</span>
-    <span class="ver" title="버전">v1.2</span>
+    <span class="ver" title="버전">v1.3</span>
   </div>
   <button type="button" class="settings-btn" id="settingsBtn" onclick="toggleSettings()" aria-haspopup="true" aria-expanded="false">
     <span class="settings-btn-icon" id="settingsBtnIcon">⚙</span>
@@ -481,7 +481,7 @@
           <div class="adv-group-title">구조화 데이터 (JSON-LD)</div>
           <label class="field" style="display:flex; align-items:center; gap:7px;">
             <input type="checkbox" id="includeJsonLd" checked style="width:auto;">
-            FAQ·리뷰·Breadcrumb 스키마 포함
+            FAQ·Breadcrumb 스키마 포함
           </label>
           <label class="field" style="margin-top:10px;">쇼핑몰 홈 URL <span class="hint" style="font-weight:400;">(Breadcrumb용, 비워두면 Breadcrumb만 생략)</span></label>
           <input type="text" id="shopHomeUrl" placeholder="예: https://dangunn76.cafe24.com/">
@@ -2049,7 +2049,7 @@ function escapeAttr(s){
 // ---------- final output generation ----------
 let generatedImageBlobs = []; // {blob, filename}
 
-// Builds FAQPage + Review JSON-LD as plain <script> tags, no HTML comments
+// Builds BreadcrumbList + FAQPage JSON-LD as plain <script> tags, no HTML comments
 // anywhere near them (a long comment block was what broke script survival
 // in earlier Cafe24 testing — see conversation notes). Deliberately does NOT
 // emit a full Product entity, to avoid colliding with Cafe24's own
@@ -2087,29 +2087,14 @@ function buildJsonLdScripts(productTitle, faqItems, reviewItems, shopHomeUrl){
     out += '<script type="application/ld+json">' + JSON.stringify(faqLd) + '<\/script>\n';
   }
 
-  if (reviewItems.length > 0){
-    // datePublished must be a full ISO date (YYYY-MM-DD). Source images often show
-    // partial dates (day/month only, no year) or OCR misreads small digits as
-    // hangul characters — either way, a malformed date is worse than no date,
-    // so only pass it through when it actually matches the required format.
-    const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
-    const reviewLd = {
-      "@context": "https://schema.org",
-      "@graph": reviewItems.map(it => {
-        const review = {
-          "@type": "Review",
-          "itemReviewed": { "@type": "Product", "name": productTitle || "상품" },
-          "reviewBody": it.text,
-          "author": { "@type": "Person", "name": "익명" }
-        };
-        if (it.date && ISO_DATE.test(it.date.trim())){
-          review.datePublished = it.date.trim();
-        }
-        return review;
-      })
-    };
-    out += '<script type="application/ld+json">' + JSON.stringify(reviewLd) + '<\/script>\n';
-  }
+  // Review JSON-LD is intentionally NOT generated (the reviewItems parameter is kept only so the
+  // call site stays unchanged). The old output nested a bare {"@type":"Product","name":…} inside every
+  // Review's itemReviewed; Google's Rich Results Test lists each of those as its own Product that lacks
+  // offers/review/aggregateRating (one critical error per review). It also could never qualify for review
+  // rich results: the tool extracts no rating, and quotes in a product image are usually a curated
+  // excerpt, so an aggregate built from them would misrepresent the real ratings. The review text itself
+  // stays on the page as visible HTML; real review structured data belongs in the product's own Product
+  // markup, fed by the mall's review board.
 
   return out;
 }
@@ -2196,6 +2181,7 @@ function generateFinalOutput(){
         text: row.querySelector('.review-text-input')?.value.trim() || '',
         date: row.querySelector('.review-date-input')?.value.trim() || ''
       })).filter(it => it.text) : [];
+      if (items.length) out += '<h4>고객 후기(발췌)</h4>\n';   // says what the quote boxes are, and that they are an excerpt
       items.forEach(it => {
         out += `<div class="geo-review">${escapeHtml(it.text)}${it.date ? `<div class="meta">작성일 ${escapeHtml(it.date)}</div>` : ''}</div>\n`;
         reviewsForLd.push(it);
