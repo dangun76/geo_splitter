@@ -375,7 +375,7 @@
   <div class="top-left">
     <h1>GEO 이미지 분해기</h1>
     <span class="tag">통이미지 → 텍스트/이미지 재구성 · 상품상세 HTML 생성</span>
-    <span class="ver" title="버전">v1.3</span>
+    <span class="ver" title="버전">v1.4</span>
   </div>
   <button type="button" class="settings-btn" id="settingsBtn" onclick="toggleSettings()" aria-haspopup="true" aria-expanded="false">
     <span class="settings-btn-icon" id="settingsBtnIcon">⚙</span>
@@ -486,6 +486,14 @@
           <label class="field" style="margin-top:10px;">쇼핑몰 홈 URL <span class="hint" style="font-weight:400;">(Breadcrumb용, 비워두면 Breadcrumb만 생략)</span></label>
           <input type="text" id="shopHomeUrl" placeholder="예: https://dangunn76.cafe24.com/">
           <p class="hint warn" id="ldWarn">⚠️ 카페24 보안/필터 앱에 따라 저장 시 걸러질 수 있습니다. 저장 후 반드시 페이지 소스에서 생존 여부를 확인하세요. 주석(&lt;!----&gt;)과 함께 붙여넣지 마세요.</p>
+        </div>
+        <div class="adv-group">
+          <div class="adv-group-title">분석 옵션</div>
+          <label class="field" style="display:flex; align-items:flex-start; gap:7px;">
+            <input type="checkbox" id="fineText" style="width:auto; margin-top:3px;">
+            <span>작은 글씨 정밀 분석</span>
+          </label>
+          <p class="hint">매우 긴 이미지를 약 1,500px 조각으로 더 잘게 나눠, AI가 글씨를 줄이지 않은 원본 해상도로 보게 합니다. 영양성분표·각주처럼 글씨가 작을 때 유리할 수 있지만 입력 토큰과 호출 횟수가 늘 수 있습니다. 기본은 꺼짐(기존 방식)입니다.</p>
         </div>
       </div>
     </details>
@@ -943,6 +951,87 @@ function sanitizeAsciiField(s){
   return (s || '').replace(/[^\x20-\x7E]/g, '');
 }
 
+// ───────────────────────── 분석 단위(구간) · 진단 기록 ─────────────────────────
+// A "unit" is a horizontal band of one uploaded image: { idx, y0, y1 } (pixel rows, y1 exclusive).
+// Normally every image is one whole unit and all units travel in ONE request, exactly like v1.3
+// (the prompt relies on seeing every image together to drop repeated messages).
+// Only an image so tall that one response could not hold all its text is cut into several units that are
+// sent in separate requests; a request that still gets cut off is split again instead of giving up.
+const fineSlicingOn = () => !!(document.getElementById('fineText') && document.getElementById('fineText').checked);
+function sliceParams(){
+  return fineSlicingOn() ? { sliceH: 1500, maxSlices: 6 } : { sliceH: 3500, maxSlices: 3 };
+}
+const unitIsPartial = u => !(u.y0 === 0 && u.y1 === uploadedImages[u.idx].height);
+const unitPct = u => { const H = uploadedImages[u.idx].height; return [Math.round(u.y0 * 100 / H), Math.round(u.y1 * 100 / H)]; };
+
+// move a planned cut onto the nearest detected section edge (background-colour change) so text isn't cut mid-block
+function snapToBoundary(item, idealPx, windowPx, minPx, maxPx){
+  const H = item.height;
+  let best = idealPx, bestD = windowPx + 1;
+  (item.detectedBoundaries || []).forEach(pct => {
+    const y = Math.round(H * pct / 100), d = Math.abs(y - idealPx);
+    if (y > minPx && y < maxPx && d <= windowPx && d < bestD){ best = y; bestD = d; }
+  });
+  return best;
+}
+
+function planUnits(item, idx){
+  const { sliceH, maxSlices } = sliceParams();
+  const chunkMax = sliceH * maxSlices, H = item.height;
+  if (H <= chunkMax) return [{ idx, y0: 0, y1: H }];                    // the normal case
+  item.detectedBoundaries = item.detectedBoundaries || detectColorBoundaries(item);
+  const n = Math.ceil(H / chunkMax), step = H / n, half = Math.round(step * 0.5);
+  const cuts = [0];
+  for (let k = 1; k < n; k++){
+    cuts.push(snapToBoundary(item, Math.round(step * k), Math.round(step * 0.2), cuts[cuts.length-1] + half, H - half * (n - k)));
+  }
+  cuts.push(H);
+  return cuts.slice(0, -1).map((y0, i) => ({ idx, y0, y1: cuts[i+1] }));
+}
+
+// consecutive whole images share one request; each partial unit (a piece of a very tall image) gets its own
+function planBatches(units){
+  const batches = [];
+  let current = [];
+  units.forEach(u => {
+    if (unitIsPartial(u)){
+      if (current.length){ batches.push(current); current = []; }
+      batches.push([u]);
+    } else {
+      current.push(u);
+    }
+  });
+  if (current.length) batches.push(current);
+  return batches;
+}
+
+// halve one unit at the best section edge near its middle; null when it is already about one slice tall
+function splitUnit(u){
+  const item = uploadedImages[u.idx], { sliceH } = sliceParams(), h = u.y1 - u.y0;
+  if (h < sliceH) return null;
+  item.detectedBoundaries = item.detectedBoundaries || detectColorBoundaries(item);
+  const mid = snapToBoundary(item, Math.round((u.y0 + u.y1) / 2), Math.round(h * 0.15), u.y0 + Math.round(h * 0.3), u.y1 - Math.round(h * 0.3));
+  return [{ idx: u.idx, y0: u.y0, y1: mid }, { idx: u.idx, y0: mid, y1: u.y1 }];
+}
+
+const mergeResults = (a, b) => ({ title: a.title || b.title, intro: a.intro || b.intro, blocks: [...a.blocks, ...b.blocks] });
+
+// What each API call actually did. stop_reason and token usage were never recorded before, which made
+// "why did this image get cut off?" impossible to answer. Also exposed as window.geoAnalysisLog for developers.
+let analysisStats = { calls: 0, truncated: 0, inputTokens: 0, outputTokens: 0, log: [] };
+function resetAnalysisStats(){
+  analysisStats = { calls: 0, truncated: 0, inputTokens: 0, outputTokens: 0, log: [] };
+  window.geoAnalysisLog = analysisStats.log;
+}
+function recordCall(entry){
+  analysisStats.calls++;
+  if (entry.truncated) analysisStats.truncated++;
+  analysisStats.inputTokens += entry.input_tokens || 0;
+  analysisStats.outputTokens += entry.output_tokens || 0;
+  analysisStats.log.push(entry);
+  console.info('[GEO 분석 호출]', Object.assign({}, entry, { text: entry.text ? `(${entry.text.length}자)` : undefined }));
+}
+
 async function analyzeImages(){
   const rawApiKey = document.getElementById('apiKey').value.trim();
   const rawModel = document.getElementById('modelName').value.trim() || 'claude-sonnet-5-5';
@@ -958,10 +1047,21 @@ async function analyzeImages(){
   }
   document.getElementById('analyzeBtn').disabled = true;
   setStatus('analyzeStatus', 'Claude에게 이미지를 분석 요청 중입니다... (이미지 수에 따라 10~40초 소요)' + sanitizeNote, 'loading');
+  resetAnalysisStats();
+  const staleRaw = document.getElementById('rawResponsePanel');
+  if (staleRaw) staleRaw.remove();
 
   try {
-    const allIndices = uploadedImages.map((_, idx) => idx);
-    const result = await analyzeBatch(allIndices, apiKey, model, 0);
+    const units = uploadedImages.flatMap((item, idx) => planUnits(item, idx));
+    const batches = planBatches(units);
+    let result = null;
+    for (let bi = 0; bi < batches.length; bi++){
+      if (batches.length > 1){
+        setStatus('analyzeStatus', `이미지가 매우 길어 ${batches.length}개 요청으로 나눠 분석합니다... (${bi+1}/${batches.length}번째 · 구간마다 30~90초 소요)` + sanitizeNote, 'loading');
+      }
+      const r = await analyzeBatch(batches[bi], apiKey, model, 0);
+      result = result ? mergeResults(result, r) : r;
+    }
 
     productTitleH3 = result.title;
     introParagraph = result.intro;
@@ -969,7 +1069,11 @@ async function analyzeImages(){
 
     renderBlocks();
     document.getElementById('resultPanel').style.display = 'block';
-    setStatus('analyzeStatus', `분석 완료 — 블록 ${extractedBlocks.length}개 추출됨. 아래에서 확인/수정하세요.`, 'ok');
+    const st = analysisStats;
+    const usageNote = st.calls
+      ? ` (API 호출 ${st.calls}회${st.truncated ? ` · 길이 제한으로 잘려 자동 재시도 ${st.truncated}회` : ''}${st.outputTokens ? ` · 출력 ${st.outputTokens.toLocaleString()} 토큰` : ''})`
+      : '';
+    setStatus('analyzeStatus', `분석 완료 — 블록 ${extractedBlocks.length}개 추출됨${usageNote}. 아래에서 확인/수정하세요.`, 'ok');
   } catch (err){
     console.error(err);
     setStatus('analyzeStatus', '오류: ' + err.message, 'error');
@@ -985,24 +1089,30 @@ async function analyzeImages(){
 // detect that cutoff (stop_reason === 'max_tokens') and automatically retry
 // with the batch split in half, recursing down further if still too long.
 // A normal small upload never hits this path — it resolves in one call.
-async function analyzeBatch(indices, apiKey, model, depth){
-  const result = await callClaudeForBatch(indices, apiKey, model);
+async function analyzeBatch(units, apiKey, model, depth){
+  const result = await callClaudeForBatch(units, apiKey, model);
 
   if (result.truncated){
-    if (indices.length === 1){
-      throw new Error(`이미지 ${indices[0]+1}번 하나만으로도 응답 길이 제한에 걸렸습니다. 이 이미지 안의 텍스트 분량이 유난히 많을 수 있습니다 — 이 이미지만 더 잘게 나눠서 다시 올려보세요.`);
+    if (units.length === 1){
+      const u = units[0];
+      const parts = splitUnit(u);
+      const [p0, p1] = unitPct(u);
+      if (!parts){
+        showRawResponse(result.text);
+        throw new Error(`이미지 ${u.idx+1}번의 ${p0}%~${p1}% 구간만으로도 응답 길이 제한에 걸렸습니다. 이 구간의 텍스트가 매우 많거나, 글씨가 너무 작아 읽지 못해 같은 말이 반복됐을 수 있습니다. 아래 "원본 응답"에서 잘린 내용을 확인해 보세요.` + (fineSlicingOn() ? '' : ' 고급 설정의 "작은 글씨 정밀 분석"을 켜면 더 잘게 나눠 보냅니다.'));
+      }
+      setStatus('analyzeStatus', `응답이 길어 이미지 ${u.idx+1}번의 ${p0}%~${p1}% 구간을 둘로 나눠 자동 재시도합니다...`, 'loading');
+      const r1 = await analyzeBatch([parts[0]], apiKey, model, depth+1);
+      const r2 = await analyzeBatch([parts[1]], apiKey, model, depth+1);
+      return mergeResults(r1, r2);
     }
-    const mid = Math.ceil(indices.length / 2);
-    const firstHalf = indices.slice(0, mid);
-    const secondHalf = indices.slice(mid);
-    setStatus('analyzeStatus', `응답이 길어 이미지 ${indices.length}장을 ${firstHalf.length}장+${secondHalf.length}장으로 나눠 자동 재시도합니다...`, 'loading');
+    const mid = Math.ceil(units.length / 2);
+    const firstHalf = units.slice(0, mid);
+    const secondHalf = units.slice(mid);
+    setStatus('analyzeStatus', `응답이 길어 이미지 ${units.length}장을 ${firstHalf.length}장+${secondHalf.length}장으로 나눠 자동 재시도합니다...`, 'loading');
     const r1 = await analyzeBatch(firstHalf, apiKey, model, depth+1);
     const r2 = await analyzeBatch(secondHalf, apiKey, model, depth+1);
-    return {
-      title: r1.title || r2.title,
-      intro: r1.intro || r2.intro,
-      blocks: [...r1.blocks, ...r2.blocks]
-    };
+    return mergeResults(r1, r2);
   }
 
   return result;
@@ -1012,21 +1122,30 @@ async function analyzeBatch(indices, apiKey, model, depth){
 // either { truncated: true } or the parsed { title, intro, blocks }, with
 // each image-type block's image_index remapped from this batch's local
 // numbering back to the original global uploadedImages index.
-async function callClaudeForBatch(indices, apiKey, model){
-  const promptText = buildPrompt(indices.length);
+async function callClaudeForBatch(units, apiKey, model){
+  const promptText = buildPrompt(units.length);
   const content = [{ type: 'text', text: promptText }];
 
-  indices.forEach((globalIdx, localIdx) => {
-    const item = uploadedImages[globalIdx];
+  units.forEach((unit, localIdx) => {
+    const item = uploadedImages[unit.idx];
     const boundaries = item.detectedBoundaries || detectColorBoundaries(item);
     item.detectedBoundaries = boundaries;
 
-    const slices = sliceAndEncodeImage(item);
-    const boundaryNote = boundaries.length > 2
-      ? ` 배경색 변화를 분석해 감지한 구간 경계는 [${boundaries.join(', ')}]% 입니다. 텍스트/비주얼 구간을 나눌 때 crop_top_pct와 crop_bottom_pct는 반드시 이 숫자들 중에서 골라 쓰고, 임의의 다른 숫자를 만들지 마세요.`
+    const partial = unitIsPartial(unit);
+    const [p0, p1] = unitPct(unit);                       // share of the WHOLE original this unit covers
+    const bList = partial ? [...new Set([p0, ...boundaries.filter(b => b > p0 && b < p1), p1])] : boundaries;
+    const slices = sliceAndEncodeImage(item, unit.y0, unit.y1);
+    const boundaryNote = bList.length > 2
+      ? ` 배경색 변화를 분석해 감지한 구간 경계는 [${bList.join(', ')}]% 입니다. 텍스트/비주얼 구간을 나눌 때 crop_top_pct와 crop_bottom_pct는 반드시 이 숫자들 중에서 골라 쓰고, 임의의 다른 숫자를 만들지 마세요.`
       : '';
 
-    if (slices.length === 1){
+    if (partial){
+      content.push({ type: 'text', text: `--- 이미지 ${localIdx+1}: 원본 이미지 ${unit.idx+1}번(가로 ${item.width}px, 세로 ${item.height}px) 중 세로 ${p0}%~${p1}% 구간만 보여드립니다. 이 구간 안의 내용만 추출하고, 구간 밖의 내용은 추측해서 만들지 마세요. 구간 경계에서 잘려 보이는 문장이나 이미지는 보이는 만큼만 다루세요. crop_top_pct/crop_bottom_pct는 이 원본 이미지 전체(세로 0~100%) 기준이며, 반드시 ${p0}~${p1} 범위 안의 값이어야 합니다.${boundaryNote}` });
+      slices.forEach((sl, si) => {
+        content.push({ type: 'text', text: `[이미지 ${localIdx+1} — 조각 ${si+1}/${slices.length}, 원본 세로 기준 ${sl.rangeLabel} 구간]` });
+        content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: sl.base64 } });
+      });
+    } else if (slices.length === 1){
       content.push({ type: 'text', text: `--- 이미지 ${localIdx+1} (가로 ${item.width}px, 세로 ${item.height}px) ---${boundaryNote}` });
       content.push({ type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: slices[0].base64 } });
     } else {
@@ -1062,8 +1181,20 @@ async function callClaudeForBatch(indices, apiKey, model){
   const textBlock = (data.content || []).find(b => b.type === 'text');
   if (!textBlock) throw new Error('응답에서 텍스트를 찾지 못했습니다.');
 
-  if (data.stop_reason === 'max_tokens'){
-    return { truncated: true };
+  const truncated = data.stop_reason === 'max_tokens';
+  const usage = data.usage || {};
+  recordCall({
+    images: units.map(u => { const [a, b] = unitPct(u); return `이미지 ${u.idx+1}: ${a}%~${b}%`; }),
+    stop_reason: data.stop_reason,
+    input_tokens: usage.input_tokens,
+    output_tokens: usage.output_tokens,
+    max_tokens: 8192,
+    truncated: truncated,
+    text: truncated ? textBlock.text : undefined      // keep what was cut off: it shows whether the text was simply long or looping
+  });
+
+  if (truncated){
+    return { truncated: true, text: textBlock.text };
   }
 
   const parsed = parseJsonFromText(textBlock.text);
@@ -1074,10 +1205,21 @@ async function callClaudeForBatch(indices, apiKey, model){
 
   const blocks = (parsed.blocks || []).map(b => {
     if (b.type === 'image'){
-      return Object.assign({}, b, { image_index: indices[b.image_index] });
+      const u = units[b.image_index];
+      const out = Object.assign({}, b, { image_index: u ? u.idx : undefined });
+      if (u && unitIsPartial(u)){
+        // the model was told to stay inside this band; if it didn't, clamp the crop and drop an empty one
+        const [a, z] = unitPct(u), top = Number(b.crop_top_pct), bottom = Number(b.crop_bottom_pct);
+        if (isFinite(top) && isFinite(bottom)){
+          out.crop_top_pct = Math.max(top, a);
+          out.crop_bottom_pct = Math.min(bottom, z);
+          if (out.crop_bottom_pct - out.crop_top_pct < 1) return null;
+        }
+      }
+      return out;
     }
     return b;
-  });
+  }).filter(Boolean);
 
   return {
     title: parsed.product_title_h3 || '',
@@ -1231,22 +1373,29 @@ function toApiSafeBase64(imgEl, origWidth, origHeight){
 // For normal-sized images, compress only as much as needed (see toApiSafeBase64 above).
 // For tall infographic-style screenshots, slicing preserves full original resolution —
 // no quality loss, no risk of blurring small text — instead of shrinking the whole image.
-function sliceAndEncodeImage(item){
+function sliceAndEncodeImage(item, y0, y1){
+  // "fine" mode shows the model ~1,500px slices (≈ its native resolution) instead of 3,500px ones that it shrinks to ~45%
+  const SAFE_SLICE_HEIGHT = fineSlicingOn() ? 1500 : 3500;
   const MAX_DIMENSION = 7900;
-  const SAFE_SLICE_HEIGHT = 3500;
   const w = item.width;
   const h = item.height;
+  const from = (y0 == null) ? 0 : y0;
+  const to = (y1 == null) ? h : y1;
+  const whole = (from === 0 && to === h);          // the whole image: exactly the v1.3 behaviour
+  const regionH = to - from;
+  const pctOf = y => Math.round(y * 100 / h);
 
-  const needsSlicing = h > MAX_DIMENSION || h > SAFE_SLICE_HEIGHT * 1.3;
+  const needsSlicing = regionH > MAX_DIMENSION || regionH > SAFE_SLICE_HEIGHT * 1.3;
   if (!needsSlicing){
-    return [{ rangeLabel: null, base64: toApiSafeBase64(item.img, w, h) }];
+    if (whole) return [{ rangeLabel: null, base64: toApiSafeBase64(item.img, w, h) }];
+    return [{ rangeLabel: `${pctOf(from)}%~${pctOf(to)}%`, base64: encodeRegion(item, from, to) }];
   }
 
-  const numSlices = Math.ceil(h / SAFE_SLICE_HEIGHT);
+  const numSlices = Math.ceil(regionH / SAFE_SLICE_HEIGHT);
   const slices = [];
   for (let s = 0; s < numSlices; s++){
-    const yStart = Math.floor(h * s / numSlices);
-    const yEnd = Math.floor(h * (s+1) / numSlices);
+    const yStart = from + Math.floor(regionH * s / numSlices);
+    const yEnd = from + Math.floor(regionH * (s+1) / numSlices);
     const sliceH = Math.max(1, yEnd - yStart);
     const canvas = document.createElement('canvas');
     canvas.width = w;
@@ -1262,11 +1411,27 @@ function sliceAndEncodeImage(item){
       base64 = canvas.toDataURL('image/jpeg', quality).split(',')[1];
     }
 
-    const pctStart = Math.round(s*100/numSlices);
-    const pctEnd = Math.round((s+1)*100/numSlices);
+    const pctStart = whole ? Math.round(s*100/numSlices) : pctOf(yStart);
+    const pctEnd = whole ? Math.round((s+1)*100/numSlices) : pctOf(yEnd);
     slices.push({ rangeLabel: `${pctStart}%~${pctEnd}%`, base64 });
   }
   return slices;
+}
+
+// JPEG of one horizontal band of the original (a partial unit that is short enough to need no slicing)
+function encodeRegion(item, y0, y1){
+  const canvas = document.createElement('canvas');
+  canvas.width = item.width;
+  canvas.height = Math.max(1, y1 - y0);
+  canvas.getContext('2d').drawImage(item.img, 0, y0, item.width, y1 - y0, 0, 0, item.width, y1 - y0);
+  let quality = 0.92;
+  let base64 = canvas.toDataURL('image/jpeg', quality).split(',')[1];
+  const maxBytes = 10 * 1024 * 1024 * 0.9;
+  while (base64.length > maxBytes && quality > 0.5){
+    quality -= 0.12;
+    base64 = canvas.toDataURL('image/jpeg', quality).split(',')[1];
+  }
+  return base64;
 }
 
 // Claude occasionally emits a literal newline/tab inside a JSON string value
@@ -1335,7 +1500,7 @@ function showRawResponse(text){
     panel.className = 'panel';
     panel.innerHTML = `
       <h2>원본 응답 (디버그용)</h2>
-      <p class="sub">JSON 파싱에 실패했을 때 Claude가 실제로 뭐라고 답했는지 확인하는 용도입니다.</p>
+      <p class="sub">JSON 파싱에 실패했거나 응답이 길이 제한으로 잘렸을 때, Claude가 실제로 뭐라고 답했는지 확인하는 용도입니다. 내용이 정말 긴지, 같은 말이 반복되는지 볼 수 있습니다.</p>
       <textarea id="rawResponseText" style="width:100%;height:240px;font-family:var(--mono);font-size:11.5px;" readonly></textarea>
     `;
     document.getElementById('analyzeStatus').insertAdjacentElement('afterend', panel);
